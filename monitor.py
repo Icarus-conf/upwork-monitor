@@ -29,14 +29,14 @@ from pathlib import Path
 import httpx
 import nodriver as uc
 from dotenv import load_dotenv
-from settings import SEARCH_URLS, SKIP_COUNTRIES, MIN_FIXED_BUDGET, COUNTRY_FLAGS
+from settings import SEARCH_URLS, SKIP_COUNTRIES, MIN_FIXED_BUDGET, COUNTRY_FLAGS, MAX_JOB_AGE_MINUTES
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
 load_dotenv(Path(__file__).parent / ".env")
 
-TELEGRAM_BOT_TOKEN: str = os.environ["TELEGRAM_BOT_TOKEN"]
-TELEGRAM_CHANNEL:   str = os.environ.get("TELEGRAM_CHANNEL", "-5087355913")
+TELEGRAM_BOT_TOKEN: str = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHANNEL:   str = os.environ.get("TELEGRAM_CHANNEL", "")
 
 BASE_URL  = "https://www.upwork.com"
 STATE_DIR = Path(__file__).parent / "state"
@@ -114,12 +114,14 @@ def parse_tiles(html: str) -> list[dict]:
         m = re.search(r'data-ev-job-uid="(\d+)"', tile)
         job["uid"] = m.group(1) if m else ""
 
-        # URL (clean, no query params)
+        # URL (clean, no query params, clean highlight tags from slug)
         m = re.search(r'href="(/jobs/[^"]+)"[^>]*data-ev-label="link"', tile)
         if not m:
             m = re.search(r'data-ev-label="link"[^>]*href="(/jobs/[^"]+)"', tile)
         if m:
-            job["url"] = BASE_URL + m.group(1).split("?")[0]
+            clean_path = m.group(1).split("?")[0]
+            clean_path = re.sub(r"span-class-highlight-[^-_]+-span-?", "", clean_path)
+            job["url"] = BASE_URL + clean_path
         else:
             job["url"] = f"{BASE_URL}/jobs/~0{job['uid']}" if job.get("uid") else ""
 
@@ -128,21 +130,21 @@ def parse_tiles(html: str) -> list[dict]:
         job["title"] = strip_tags(m.group(1)) if m else ""
 
         # Posted date
-        m = re.search(
-            r'data-test="job-pubilshed-date"[^>]*>.*?<span[^>]*>[^<]+</span>\s*<span[^>]*>([^<]+)</span>',
-            tile, re.DOTALL,
-        )
-        job["posted"] = m.group(1).strip() if m else ""
+        m = re.search(r'data-test="job-pubilshed-date"[^>]*>(.*?)</small>', tile, re.DOTALL)
+        if not m:
+            m = re.search(r'data-test="job-pubilshed-date"[^>]*>(.*?)</div>', tile, re.DOTALL)
+        job["posted"] = strip_tags(m.group(1)) if m else ""
 
         # Job type / rate
         m = re.search(r'data-test="job-type-label"[^>]*><strong>([^<]+)</strong>', tile)
-        job["rate"] = m.group(1).strip() if m else ""
+        rate_val = m.group(1).strip() if m else ""
+        m_hr = re.search(r'\$([\d,\.]+)\s*-\s*\$([\d,\.]+)', tile)
+        if m_hr:
+            rate_val = f"${m_hr.group(1)} - ${m_hr.group(2)}/hr"
+        job["rate"] = rate_val
 
         # Fixed price budget
-        m = re.search(
-            r'data-test="is-fixed-price".*?Est\. budget:.*?<strong[^>]*>\$?([\d,\.]+)</strong>',
-            tile, re.DOTALL,
-        )
+        m = re.search(r'data-test="is-fixed-price"[^>]*>.*?\$([\d,\.]+)', tile, re.DOTALL)
         job["fixed_budget"] = f"${m.group(1)}" if m else ""
 
         # Experience level
@@ -154,9 +156,10 @@ def parse_tiles(html: str) -> list[dict]:
         job["description"] = strip_tags(m.group(1))[:300] if m else ""
 
         # Required skills
-        job["skills"] = re.findall(
-            r'data-test="token"[^>]*><span[^>]*>([^<]+)</span>', tile,
-        )
+        job["skills"] = [
+            strip_tags(s)
+            for s in re.findall(r'data-test="token"[^>]*>(.*?)</button>', tile, re.DOTALL)
+        ]
 
         # Client info (basic — enriched later from job page)
         job["payment_verified"] = bool(re.search(r"Payment method verified", tile))
@@ -292,12 +295,41 @@ async def fetch_client_info(browser, job_url: str) -> dict:
 
 # ── Filtering ─────────────────────────────────────────────────────────────────
 
+def parse_age_minutes(posted_str: str) -> int | None:
+    """Parse relative posted string (e.g. 'Posted 15 minutes ago') into minutes."""
+    if not posted_str:
+        return None
+    s = posted_str.lower().strip()
+    if "just now" in s or "second" in s:
+        return 0
+    m_min = re.search(r"(\d+)\s*min", s)
+    if m_min:
+        return int(m_min.group(1))
+    m_hr = re.search(r"(\d+)\s*hour", s)
+    if m_hr:
+        return int(m_hr.group(1)) * 60
+    m_day = re.search(r"(\d+)\s*day", s)
+    if m_day:
+        return int(m_day.group(1)) * 1440
+    if "yesterday" in s:
+        return 1440
+    return None
+
+
 def should_skip(job: dict) -> str | None:
     """Return a skip reason string, or None if the job should be sent."""
+    # 1. Job age filter (under 1 hour)
+    posted_str = (job.get("posted") or "").strip()
+    age_min = parse_age_minutes(posted_str)
+    if age_min is not None and age_min > MAX_JOB_AGE_MINUTES:
+        return f"age={posted_str} (> {MAX_JOB_AGE_MINUTES}m)"
+
+    # 2. Country filter
     country = (job.get("country") or "").strip().lower()
     if country in SKIP_COUNTRIES:
         return f"country={job.get('country')}"
 
+    # 3. Minimum fixed budget
     budget_str = job.get("fixed_budget", "")
     if budget_str:
         amount = float(re.sub(r"[^\d.]", "", budget_str) or "0")
@@ -317,7 +349,7 @@ def escape_md(s: str) -> str:
 
 
 def format_job(job: dict) -> str:
-    """Format a job dict into a Telegram MarkdownV2 message."""
+    """Format a job dict into a Telegram MarkdownV2 message (clean text, no emojis)."""
     t       = escape_md(job["title"])
     rate    = escape_md(job.get("rate", ""))
     level   = escape_md(job.get("level", ""))
@@ -326,57 +358,56 @@ def format_job(job: dict) -> str:
     url     = job["url"]
     skills  = job.get("skills", [])
     country = job.get("country", "")
-    flag    = COUNTRY_FLAGS.get(country, "🌍")
 
     lines = [
         f"*{t}*",
-        "————————————————————————",
+        "----------------------------------------",
         "*Contract details*",
     ]
     if posted:
-        lines.append(f"⌛️ {posted}")
+        lines.append(f"Posted: {posted}")
     if rate:
         budget = escape_md(job.get("fixed_budget", ""))
-        lines.append(f"💻 {rate}: {budget} 💲" if budget else f"💻 {rate} 💲")
+        lines.append(f"Rate: {rate} \\({budget}\\)" if budget else f"Rate: {rate}")
     if level:
-        lines.append(f"♟ {level}")
+        lines.append(f"Level: {level}")
     if skills:
-        lines.append(f"🛠 {escape_md(', '.join(skills[:6]))}")
-    lines.append(f"🔗 [Open job]({url})")
-    lines.append("————————————————————————")
+        lines.append(f"Skills: {escape_md(', '.join(skills[:6]))}")
+    lines.append(f"[Open Job Link]({url})")
+    lines.append("----------------------------------------")
 
     # Client block
     client_lines = []
     if job.get("payment_verified"):
-        client_lines.append("✅ Payment verified")
+        client_lines.append("Payment: Verified")
     if job.get("rating"):
-        client_lines.append(f"⭐️ {escape_md(job['rating'])}")
+        client_lines.append(f"Rating: {escape_md(job['rating'])}")
     if job.get("spent"):
-        client_lines.append(f"💰 {escape_md(job['spent'])} spent")
+        client_lines.append(f"Total Spent: {escape_md(job['spent'])}")
     if job.get("hires"):
-        client_lines.append(f"🤝 {escape_md(job['hires'])}")
+        client_lines.append(f"Hires: {escape_md(job['hires'])}")
     if country:
-        client_lines.append(f"{flag} {escape_md(country)}")
+        client_lines.append(f"Country: {escape_md(country)}")
     if client_lines:
         lines.append("*Client info*")
         lines.extend(client_lines)
-        lines.append("————————————————————————")
+        lines.append("----------------------------------------")
 
     # Activity block
     activity_lines = []
-    for label, icon, key in [
-        ("Proposals",    "📨", "proposals"),
-        ("Interviewing", "💬", "interviewing"),
-        ("Invites sent", "📩", "invites_sent"),
-        ("Unanswered",   "🔕", "unanswered"),
-        ("Last viewed",  "👁",  "last_viewed"),
+    for label, key in [
+        ("Proposals",    "proposals"),
+        ("Interviewing", "interviewing"),
+        ("Invites sent", "invites_sent"),
+        ("Unanswered",   "unanswered"),
+        ("Last viewed",  "last_viewed"),
     ]:
         if job.get(key):
-            activity_lines.append(f"{icon} {label}: {escape_md(job[key])}")
+            activity_lines.append(f"{label}: {escape_md(job[key])}")
     if activity_lines:
         lines.append("*Activity on this job*")
         lines.extend(activity_lines)
-        lines.append("————————————————————————")
+        lines.append("----------------------------------------")
 
     if desc:
         suffix = escape_md("...") if len(job["description"]) >= 300 else ""
@@ -388,6 +419,11 @@ def format_job(job: dict) -> str:
 # ── Telegram sender ───────────────────────────────────────────────────────────
 
 async def send_telegram(text: str) -> None:
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHANNEL:
+        print("  [Notice] Telegram credentials not configured in .env. Alert preview:")
+        print(text)
+        return
+
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     async with httpx.AsyncClient() as client:
         r = await client.post(
@@ -409,26 +445,43 @@ async def send_telegram(text: str) -> None:
 
 async def main(url_idx: int) -> None:
     seen = load_state()
-    print(f"[url_{url_idx}] Known UIDs: {len(seen)}", flush=True)
+    print(f"Known seen jobs in state: {len(seen)}", flush=True)
 
-    browser = await uc.start(headless=False)
+    browser = await uc.start(
+        headless=False,
+        browser_args=[
+            "--window-position=-3000,-3000",
+            "--window-size=1200,800",
+            "--no-first-run",
+            "--no-default-browser-check",
+        ],
+    )
     all_jobs: list[dict] = []
 
     try:
         for search_url in SEARCH_URLS:
-            print(f"Opening: ...{search_url[60:100]}", flush=True)
+            print(f"Opening search: {search_url}", flush=True)
             page = await browser.get(search_url)
 
             # Wait for Cloudflare challenge to pass
-            for _ in range(20):
+            for _ in range(25):
                 await asyncio.sleep(1)
                 title = await page.evaluate("document.title")
-                if "moment" not in title.lower():
+                if title and "moment" not in title.lower():
                     break
-            await asyncio.sleep(3)
 
+            # Wait for job tiles to hydrate into DOM
+            for _ in range(10):
+                has_tiles = await page.evaluate(
+                    "!!document.querySelector('[data-test=\"JobTile\"]')"
+                )
+                if has_tiles:
+                    break
+                await asyncio.sleep(1)
+
+            await asyncio.sleep(2)
             html = await page.get_content()
-            print(f"  HTML: {len(html)} chars", flush=True)
+            print(f"  HTML loaded: {len(html)} chars", flush=True)
             all_jobs.extend(parse_tiles(html))
             await asyncio.sleep(2)
 
@@ -445,6 +498,13 @@ async def main(url_idx: int) -> None:
         print(f"Jobs parsed: {len(unique_jobs)}, new: {len(new_jobs)}", flush=True)
 
         for job in new_jobs:
+            # Fast filter check (age & budget) before opening individual job tab
+            pre_skip = should_skip(job)
+            if pre_skip:
+                print(f"  SKIP ({pre_skip}): {job['title'][:50]}", flush=True)
+                seen.add(job["uid"])
+                continue
+
             if job.get("url"):
                 print(f"  Fetching client info: {job['title'][:50]}", flush=True)
                 client_info = await fetch_client_info(browser, job["url"])
@@ -477,8 +537,11 @@ if __name__ == "__main__":
         sys.exit(0)
 
     try:
-        idx = int(sys.argv[1]) if len(sys.argv) > 1 else 0
-        SEARCH_URLS[:] = [SEARCH_URLS[idx]]
+        if len(sys.argv) > 1:
+            idx = int(sys.argv[1])
+            SEARCH_URLS[:] = [SEARCH_URLS[idx]]
+        else:
+            idx = 0
         uc.loop().run_until_complete(main(idx))
     finally:
         fcntl.flock(lock_fd, fcntl.LOCK_UN)

@@ -1,20 +1,30 @@
-# Secrets
+# Secrets & environment
 .env
+*.env
 
-# Runtime state
+# Runtime state & locks
 state/
 *.lock
+*.pid
 
 # Logs
 logs/
 *.log
 
-# Python
+# OS artifacts
+.DS_Store
+Thumbs.db
+
+# Python & virtual environments
 __pycache__/
 *.py[cod]
+*$py.class
 *.egg-info/
 .venv/
 venv/
+ENV/
 
 # Debug files
 debug_client.log
+test_search.html
+*.tmp

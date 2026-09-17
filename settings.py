@@ -11,38 +11,56 @@ Edit this file to add/remove search URLs, adjust filters, etc.
 # Each URL gets its own systemd timer.
 # Run `sudo bash setup_timers.sh` after adding/removing URLs.
 
-SEARCH_URLS = [
-    # Python backend
-    "https://www.upwork.com/nx/search/jobs/?contractor_tier=1,2,3&hourly_rate=25-&job_type=hourly,fixed&q=Python%20Backend%20Developer%20RestAPI%20Rest%20API&sort=recency&t=0,1",
-    # FastAPI / Django / PostgreSQL
-    "https://www.upwork.com/nx/search/jobs/?contractor_tier=1,2,3&hourly_rate=25-&job_type=hourly,fixed&q=FastAPI%20Fast%20API%20Python%20PostgreSQL%20SQL%20Postgres%20Django&sort=recency&t=0,1",
-    # Scraping
-    "https://www.upwork.com/nx/search/jobs/?contractor_tier=1,2,3&hourly_rate=25-&job_type=hourly,fixed&q=Scrapy%20Scraping%20Scrapping%20Data%20Extraction&sort=recency&t=0,1",
-    # Automation / bots
-    "https://www.upwork.com/nx/search/jobs/?contractor_tier=1,2,3&hourly_rate=25-&job_type=hourly,fixed&q=Python%20Automation%20Bots%20Scripts&sort=recency&t=0,1",
-    # React / Next.js
-    "https://www.upwork.com/nx/search/jobs/?contractor_tier=1,2,3&hourly_rate=25-&job_type=hourly,fixed&q=React.js%20ReactJS%20React%20Js%20Next.js%20NextJS%20Next%20Js%20Full%20Stack%20FullStack&sort=recency&t=0,1",
-    # React Native / mobile
-    "https://www.upwork.com/nx/search/jobs/?contractor_tier=1,2,3&hourly_rate=25-&job_type=hourly,fixed&q=ReactNative%20React%20Native%20Mobile%20App&sort=recency&t=0,1",
-    # LLM / RAG / AI agents
-    "https://www.upwork.com/nx/search/jobs/?contractor_tier=1,2,3&hourly_rate=25-&job_type=hourly,fixed&q=LLM%20RAG%20AI%20Agent%20LangChain%20LlamaIndex&sort=recency&t=0,1",
-    # Data pipelines / ETL
-    "https://www.upwork.com/nx/search/jobs/?contractor_tier=1,2,3&hourly_rate=25-&job_type=hourly,fixed&q=Data%20Pipeline%20ETL%20PostgreSQL%20Scraping%20Data%20Engineering&sort=recency&t=0,1",
+import os
+import urllib.parse
+from pathlib import Path
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).parent / ".env")
+
+DEFAULT_SEARCH_URLS = [
+    # Flutter Mobile (iOS & Android)
+    "https://www.upwork.com/nx/search/jobs/?q=Flutter&sort=recency",
+    # iOS / Swift / SwiftUI
+    "https://www.upwork.com/nx/search/jobs/?q=iOS%20Swift&sort=recency",
+    # React / Next.js / Frontend
+    "https://www.upwork.com/nx/search/jobs/?q=React%20Next.js&sort=recency",
+    # Node.js / NestJS / TypeScript Backend
+    "https://www.upwork.com/nx/search/jobs/?q=Node.js%20NestJS%20TypeScript&sort=recency",
+    # Laravel / PHP Backend
+    "https://www.upwork.com/nx/search/jobs/?q=Laravel&sort=recency",
+    # Full Stack Web & Mobile (TypeScript, MySQL, Node, React)
+    "https://www.upwork.com/nx/search/jobs/?q=Fullstack%20TypeScript%20Node%20MySQL&sort=recency",
 ]
+
+# Configurable via .env:
+# SEARCH_KEYWORDS="Flutter, iOS Swift, React, Node.js" (comma-separated)
+# OR full custom URLs via SEARCH_URLS="https://...,https://..."
+env_keywords = os.environ.get("SEARCH_KEYWORDS", "").strip()
+env_urls = os.environ.get("SEARCH_URLS", "").strip()
+
+if env_keywords:
+    SEARCH_URLS = [
+        f"https://www.upwork.com/nx/search/jobs/?q={urllib.parse.quote(kw.strip())}&sort=recency"
+        for kw in env_keywords.split(",")
+        if kw.strip()
+    ]
+elif env_urls:
+    SEARCH_URLS = [url.strip() for url in env_urls.split(",") if url.strip()]
+else:
+    SEARCH_URLS = DEFAULT_SEARCH_URLS
 
 # ── Filters ───────────────────────────────────────────────────────────────────
 
-# Skip jobs from these countries (lowercase)
-SKIP_COUNTRIES = {"india", "bangladesh", "pakistan"}
+# Skip jobs from these countries (lowercase name or 3-letter ISO code)
+SKIP_COUNTRIES = {"india", "ind", "bangladesh", "bgd", "pakistan", "pak"}
 
-# Skip fixed-price jobs below this budget (USD)
-MIN_FIXED_BUDGET = 1000
+# Skip fixed-price jobs below this budget (USD) - customizable via .env MIN_FIXED_BUDGET
+MIN_FIXED_BUDGET = int(os.environ.get("MIN_FIXED_BUDGET", "50"))
 
-# ── Country flags ─────────────────────────────────────────────────────────────
+# Maximum job age in minutes — customizable via .env MAX_JOB_AGE_MINUTES (default 60 = under 1 hour)
+MAX_JOB_AGE_MINUTES = int(os.environ.get("MAX_JOB_AGE_MINUTES", "60"))
 
-COUNTRY_FLAGS = {
-    "United States": "🇺🇸", "Canada": "🇨🇦", "United Kingdom": "🇬🇧",
-    "Australia": "🇦🇺", "Germany": "🇩🇪", "Netherlands": "🇳🇱",
-    "France": "🇫🇷", "Sweden": "🇸🇪", "Norway": "🇳🇴",
-    "Switzerland": "🇨🇭", "Israel": "🇮🇱", "UAE": "🇦🇪", "Singapore": "🇸🇬",
-}
+# ── Country settings ──────────────────────────────────────────────────────────
+# Country flags dictionary removed to ensure clean emoji-free text output
+COUNTRY_FLAGS = {}

@@ -83,6 +83,6 @@ for i in $(seq 0 $(( URL_COUNT - 1 ))); do
 done
 
 echo ""
-echo "✅ Done! Installed ${URL_COUNT} timers (check interval: ~${OFFSET_STEP}min)."
+echo "Done! Installed ${URL_COUNT} timers (check interval: ~${OFFSET_STEP}min)."
 echo ""
 systemctl list-timers "upwork-monitor-*" --no-pager
